@@ -131,7 +131,7 @@ class DocOrchestrator:
             f"[bold cyan]{self.config.name}[/bold cyan]\n"
             f"Mode: [yellow]{self.config.global_mode}[/yellow]\n"
             f"Session: [dim]{self.session_id}[/dim]",
-            title="🚀 Your Personalized Document Orchestrator"
+            title="🚀 Your Personalized Idea and Document Creator"
         ))
 
         try:
@@ -475,7 +475,7 @@ class DocOrchestrator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Your Personalized Document Orchestrator - Content Generation Pipeline",
+        description="Your Personalized Idea and Document Creator - Content Generation Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
