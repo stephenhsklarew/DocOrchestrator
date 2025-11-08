@@ -190,9 +190,10 @@ class DocOrchestrator:
 
     def _run_stage1(self) -> List[Path]:
         """Run DocIdeaGenerator and return list of generated topic files"""
-        # Change to topics directory so files are saved there
+        # Run from DocIdeaGenerator directory to access credentials.json
+        idea_gen_dir = self.idea_generator_path.parent
         original_cwd = Path.cwd()
-        os.chdir(self.topics_dir)
+        os.chdir(idea_gen_dir)
 
         try:
             # Build command
@@ -224,19 +225,27 @@ class DocOrchestrator:
                 self.console.print(f"[red]Stage 1 exited with code {result.returncode}[/red]")
                 return []
 
+            # Find generated topic files in DocIdeaGenerator directory
+            topic_files = list(idea_gen_dir.glob("topic_*.md"))
+
+            if not topic_files:
+                # Try alternative patterns
+                topic_files = list(idea_gen_dir.glob("analysis_*.md"))
+
+            # Move files to topics directory
+            moved_files = []
+            for file_path in topic_files:
+                dest_path = self.topics_dir / file_path.name
+                import shutil
+                shutil.move(str(file_path), str(dest_path))
+                moved_files.append(dest_path)
+
+            self.console.print(f"\n[green]✓[/green] Found {len(moved_files)} topic file(s)")
+
+            return sorted(moved_files)
+
         finally:
             os.chdir(original_cwd)
-
-        # Find generated topic files
-        topic_files = list(self.topics_dir.glob("topic_*.md"))
-
-        if not topic_files:
-            # Try alternative patterns
-            topic_files = list(self.topics_dir.glob("analysis_*.md"))
-
-        self.console.print(f"\n[green]✓[/green] Found {len(topic_files)} topic file(s)")
-
-        return sorted(topic_files)
 
     def _manual_topic_selection(self) -> List[Path]:
         """Allow user to manually specify topic files"""
