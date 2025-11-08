@@ -12,6 +12,10 @@ ENV/
 sessions/
 *.json
 
+# Google credentials
+token.pickle
+*.pickle
+
 # Config files (may contain sensitive data)
 *.yaml
 !config.example.yaml
