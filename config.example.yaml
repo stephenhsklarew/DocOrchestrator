@@ -1,0 +1,52 @@
+# DocOrchestrator Configuration Example
+# Copy this file to your own config (e.g., my_pipeline.yaml) and customize
+
+name: "Weekly Content Pipeline"
+
+# Global settings that apply to all stages
+global:
+  mode: "test"  # "test" (Gemini 1.5 Flash - free) or "production" (GPT-4o)
+
+# Stage 1: Idea Generation (DocIdeaGenerator)
+idea_generation:
+  # Source: "gmail" or "drive"
+  source: "gmail"
+
+  # Gmail source options
+  start_date: "01012025"  # MMDDYYYY format (optional)
+  label: "AIQ"  # Gmail label to filter (optional)
+
+  # Google Drive source options (only used if source: "drive")
+  folder_id: ""  # Google Drive folder ID
+
+  # Analysis options
+  focus: "AI transformation and business strategy"  # Content focus/perspective
+
+  # Output options
+  combined_topics: false  # true = one file per transcript, false = one file per topic
+  # Note: Phase 1 always saves locally as markdown for orchestration
+
+# Stage 2: Document Generation (PersonalizedDocGenerator)
+# These parameters apply to all selected topics
+document_generation:
+  # Writing configuration
+  style: "~/Documents/my_writing_style.txt"  # Path to writing style guide (optional)
+  audience: "business executives and technical leaders"
+  type: "blog post"  # "blog post", "whitepaper", "article", "case study", etc.
+  size: "800-1000 words"
+
+  # Optional customer story/case study
+  customer_story: ""  # Path to customer story file (optional, AI creates fictional if empty)
+
+  # Output location
+  output: "./output"  # Local path or Google Drive folder URL
+
+  # Optional: Override mode for stage 2 only
+  # mode: "production"  # Uncomment to use production mode for final docs even if stage 1 was test
+
+# Orchestration behavior settings
+orchestration:
+  stage1_timeout: 600  # Timeout for idea generation in seconds (10 minutes)
+  stage2_timeout: 300  # Timeout per document in seconds (5 minutes)
+  retry_on_failure: true  # Continue if a document fails to generate
+  save_session: true  # Save session data for debugging/recovery
