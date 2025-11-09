@@ -12,6 +12,7 @@ import json
 import yaml
 import subprocess
 import argparse
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -41,6 +42,7 @@ class OrchestratorConfig:
     idea_source: str
     idea_start_date: Optional[str]
     idea_label: Optional[str]
+    idea_email_subject: Optional[str]
     idea_focus: Optional[str]
     idea_folder_id: Optional[str]
     idea_combined_topics: bool
@@ -60,32 +62,97 @@ class OrchestratorConfig:
     retry_on_failure: bool
     save_session: bool
 
+    # Dependency paths (optional, defaults to ../DocIdeaGenerator and ../PersonalizedDocGenerator)
+    idea_generator_path: Optional[str] = None
+    doc_generator_path: Optional[str] = None
+
+    # Logging settings
+    log_level: str = "INFO"
+
+    # Phase 2: Manifest-based integration
+    use_manifest: bool = True  # Use manifest if available, fall back to file discovery
+    batch_mode: bool = False  # Run Stage 1 in batch mode (requires external program support)
+
 
 class DocOrchestrator:
     """Main orchestrator class"""
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, auto_confirm: bool = False):
         """Initialize orchestrator with config file"""
         self.console = Console()
         self.config = self._load_config(config_path)
+        self.auto_confirm = auto_confirm
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.session_dir = Path("sessions") / self.session_id
+        # Use absolute path for session directory to avoid issues when changing working directory
+        self.session_dir = (Path.cwd() / "sessions" / self.session_id).absolute()
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
-        # Paths to other programs
+        # Set up logging
+        self._setup_logging()
+
+        self.logger.info(f"Initializing DocOrchestrator - Session ID: {self.session_id}")
+        self.logger.info(f"Config loaded from: {config_path}")
+
+        # Paths to other programs (use config paths if provided, otherwise default)
         self.scripts_dir = Path(__file__).parent.parent
-        self.idea_generator_path = self.scripts_dir / "DocIdeaGenerator" / "cli.py"
-        self.doc_generator_path = self.scripts_dir / "PersonalizedDocGenerator" / "document_generator.py"
+        if self.config.idea_generator_path:
+            self.idea_generator_path = Path(self.config.idea_generator_path).expanduser()
+            self.logger.info(f"Using custom DocIdeaGenerator path from config: {self.idea_generator_path}")
+        else:
+            self.idea_generator_path = self.scripts_dir / "DocIdeaGenerator" / "cli.py"
+            self.logger.debug(f"Using default DocIdeaGenerator path: {self.idea_generator_path}")
+
+        if self.config.doc_generator_path:
+            self.doc_generator_path = Path(self.config.doc_generator_path).expanduser()
+            self.logger.info(f"Using custom PersonalizedDocGenerator path from config: {self.doc_generator_path}")
+        else:
+            self.doc_generator_path = self.scripts_dir / "PersonalizedDocGenerator" / "document_generator.py"
+            self.logger.debug(f"Using default PersonalizedDocGenerator path: {self.doc_generator_path}")
 
         # Working directory for topic files
         self.topics_dir = self.session_dir / "topics"
         self.topics_dir.mkdir(exist_ok=True)
+        self.logger.debug(f"Session directory: {self.session_dir}")
+        self.logger.debug(f"Topics directory: {self.topics_dir}")
 
         # Validate paths
         if not self.idea_generator_path.exists():
+            self.logger.error(f"DocIdeaGenerator not found at {self.idea_generator_path}")
             raise FileNotFoundError(f"DocIdeaGenerator not found at {self.idea_generator_path}")
         if not self.doc_generator_path.exists():
+            self.logger.error(f"PersonalizedDocGenerator not found at {self.doc_generator_path}")
             raise FileNotFoundError(f"PersonalizedDocGenerator not found at {self.doc_generator_path}")
+
+        self.logger.info("Initialization complete - all dependencies validated")
+
+    def _setup_logging(self):
+        """Configure logging to both file and console"""
+        # Create logger
+        self.logger = logging.getLogger('DocOrchestrator')
+        self.logger.setLevel(getattr(logging, self.config.log_level.upper(), logging.INFO))
+
+        # Clear any existing handlers
+        self.logger.handlers.clear()
+
+        # File handler - detailed logs
+        log_file = self.session_dir / "orchestrator.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)  # Always log DEBUG to file
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+        )
+        file_handler.setFormatter(file_formatter)
+        self.logger.addHandler(file_handler)
+
+        # Console handler - less verbose
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(getattr(logging, self.config.log_level.upper(), logging.INFO))
+        console_formatter = logging.Formatter('%(levelname)s: %(message)s')
+        console_handler.setFormatter(console_formatter)
+        self.logger.addHandler(console_handler)
+
+        # Prevent propagation to root logger
+        self.logger.propagate = False
 
     def _load_config(self, config_path: str) -> OrchestratorConfig:
         """Load configuration from YAML file"""
@@ -105,6 +172,7 @@ class DocOrchestrator:
             idea_source=idea_gen.get('source', 'gmail'),
             idea_start_date=idea_gen.get('start_date'),
             idea_label=idea_gen.get('label'),
+            idea_email_subject=idea_gen.get('email_subject'),
             idea_focus=idea_gen.get('focus'),
             idea_folder_id=idea_gen.get('folder_id'),
             idea_combined_topics=idea_gen.get('combined_topics', False),
@@ -123,10 +191,24 @@ class DocOrchestrator:
             stage2_timeout=orchestration.get('stage2_timeout', 300),
             retry_on_failure=orchestration.get('retry_on_failure', True),
             save_session=orchestration.get('save_session', True),
+
+            # Dependency paths (optional)
+            idea_generator_path=orchestration.get('idea_generator_path'),
+            doc_generator_path=orchestration.get('doc_generator_path'),
+
+            # Logging
+            log_level=orchestration.get('log_level', 'INFO'),
+
+            # Phase 2: Manifest-based integration
+            use_manifest=orchestration.get('use_manifest', True),
+            batch_mode=orchestration.get('batch_mode', False),
         )
 
     def run(self):
         """Run the complete orchestration workflow"""
+        self.logger.info(f"Starting orchestration workflow: {self.config.name}")
+        self.logger.info(f"Mode: {self.config.global_mode}")
+
         self.console.print(Panel.fit(
             f"[bold cyan]{self.config.name}[/bold cyan]\n"
             f"Mode: [yellow]{self.config.global_mode}[/yellow]\n"
@@ -136,64 +218,96 @@ class DocOrchestrator:
 
         try:
             # Stage 1: Generate ideas
+            self.logger.info("Starting Stage 1: Idea Generation")
             self.console.print("\n[bold]Stage 1: Generating Topic Ideas[/bold]")
             self.console.print("[dim]This will run DocIdeaGenerator interactively.[/dim]")
             self.console.print("[dim]Please follow the prompts to generate and save topics.[/dim]\n")
 
-            if not Confirm.ask("[yellow]Ready to start idea generation?[/yellow]", default=True):
-                self.console.print("[yellow]Cancelled.[/yellow]")
-                return 0
+            if not self.auto_confirm:
+                if not Confirm.ask("[yellow]Ready to start idea generation?[/yellow]", default=True):
+                    self.logger.info("User cancelled at Stage 1 prompt")
+                    self.console.print("[yellow]Cancelled.[/yellow]")
+                    return 0
+            else:
+                self.logger.info("Auto-confirming Stage 1 start (--yes flag)")
+                self.console.print("[green]Auto-confirmed: Starting idea generation[/green]")
 
             topic_files = self._run_stage1()
+            self.logger.info(f"Stage 1 complete. Found {len(topic_files)} topic files")
 
             if not topic_files:
+                self.logger.warning("No topic files found after Stage 1")
                 self.console.print("[yellow]No topic files found. Make sure to save topics when prompted by DocIdeaGenerator.[/yellow]")
                 self.console.print("[dim]Hint: DocIdeaGenerator saves topics as 'topic_N_*.md' files in the current directory.[/dim]")
 
                 # Ask if user wants to manually specify topic files
-                if Confirm.ask("\n[yellow]Do you want to manually specify topic files to process?[/yellow]", default=False):
+                if not self.auto_confirm and Confirm.ask("\n[yellow]Do you want to manually specify topic files to process?[/yellow]", default=False):
+                    self.logger.info("User opted for manual topic file selection")
                     topic_files = self._manual_topic_selection()
 
                 if not topic_files:
+                    self.logger.warning("No topic files available. Exiting.")
                     return 1
 
             # Human review checkpoint
+            self.logger.info("Starting Stage 2: Human Review and Topic Selection")
             self.console.print(f"\n[bold]Stage 2: Review and Select Topics[/bold]")
             selected_topics = self._interactive_review(topic_files)
 
             if not selected_topics:
+                self.logger.info("No topics selected by user. Exiting.")
                 self.console.print("[yellow]No topics selected. Exiting.[/yellow]")
                 return 0
 
+            self.logger.info(f"User selected {len(selected_topics)} topics for document generation")
+
             # Confirm parameters
-            if not self._confirm_parameters(selected_topics):
-                self.console.print("[yellow]Cancelled by user.[/yellow]")
-                return 0
+            if not self.auto_confirm:
+                if not self._confirm_parameters(selected_topics):
+                    self.logger.info("User cancelled at parameter confirmation")
+                    self.console.print("[yellow]Cancelled by user.[/yellow]")
+                    return 0
+            else:
+                self.logger.info("Auto-confirming parameters (--yes flag)")
+                self._display_parameters(selected_topics)
+                self.console.print("[green]Auto-confirmed: Proceeding with document generation[/green]")
 
             # Stage 3: Generate documents
+            self.logger.info("Starting Stage 3: Document Generation")
             self.console.print(f"\n[bold]Stage 3: Generating Documents[/bold]")
             documents = self._run_stage2(selected_topics)
 
             # Summary
+            self.logger.info("Orchestration workflow complete")
             self._print_summary(topic_files, selected_topics, documents)
 
             return 0
 
         except KeyboardInterrupt:
+            self.logger.warning("Workflow interrupted by user (KeyboardInterrupt)")
             self.console.print("\n[yellow]Interrupted by user.[/yellow]")
             return 130
         except Exception as e:
+            self.logger.error(f"Fatal error in orchestration workflow: {e}", exc_info=True)
             self.console.print(f"\n[red]Error: {e}[/red]")
             if self.config.retry_on_failure:
                 self.console.print("[dim]Session saved for potential recovery.[/dim]")
             raise
 
     def _run_stage1(self) -> List[Path]:
-        """Run DocIdeaGenerator and return list of generated topic files"""
+        """Run DocIdeaGenerator and return list of generated topic files
+
+        Supports both Phase 1 (file discovery) and Phase 2 (manifest-based) integration.
+        """
+        self.logger.debug("Entering _run_stage1")
         # Run from DocIdeaGenerator directory to access credentials.json
         idea_gen_dir = self.idea_generator_path.parent
         original_cwd = Path.cwd()
+        self.logger.debug(f"Changing directory from {original_cwd} to {idea_gen_dir}")
         os.chdir(idea_gen_dir)
+
+        # Manifest file path (absolute)
+        manifest_file = self.session_dir / "ideas_manifest.json"
 
         try:
             # Build command
@@ -204,11 +318,25 @@ class DocOrchestrator:
                 "--save-local",  # Always save as local markdown for orchestration
             ]
 
+            # Phase 2: Add manifest and batch mode flags if enabled
+            if self.config.use_manifest and self.config.batch_mode:
+                cmd.extend(["--batch", "--output-manifest", str(manifest_file)])
+                self.logger.info("Phase 2 mode: Using batch mode with manifest output")
+            else:
+                self.logger.info("Phase 1 mode: Using interactive file discovery")
+
+            # Add --yes flag for auto-confirmation if enabled
+            if self.auto_confirm:
+                cmd.append("--yes")
+                self.logger.info("Adding --yes flag to DocIdeaGenerator for auto-confirmation")
+
             # Add optional arguments
             if self.config.idea_start_date:
                 cmd.extend(["--start-date", self.config.idea_start_date])
             if self.config.idea_label:
                 cmd.extend(["--label", self.config.idea_label])
+            if self.config.idea_email_subject:
+                cmd.extend(["--email", self.config.idea_email_subject])
             if self.config.idea_focus:
                 cmd.extend(["--focus", self.config.idea_focus])
             if self.config.idea_folder_id:
@@ -216,36 +344,100 @@ class DocOrchestrator:
             if self.config.idea_combined_topics:
                 cmd.append("--combined-topics")
 
+            self.logger.info(f"Executing DocIdeaGenerator: {' '.join(cmd)}")
             self.console.print(f"[dim]Running: {' '.join(cmd)}[/dim]\n")
 
-            # Run interactively (user will see and interact with DocIdeaGenerator)
+            # Run (interactive or batch depending on config)
             result = subprocess.run(cmd, timeout=self.config.stage1_timeout)
 
             if result.returncode != 0:
+                self.logger.error(f"DocIdeaGenerator exited with non-zero code: {result.returncode}")
                 self.console.print(f"[red]Stage 1 exited with code {result.returncode}[/red]")
                 return []
 
-            # Find generated topic files in DocIdeaGenerator directory
-            topic_files = list(idea_gen_dir.glob("topic_*.md"))
+            self.logger.debug("DocIdeaGenerator completed successfully")
 
-            if not topic_files:
-                # Try alternative patterns
-                topic_files = list(idea_gen_dir.glob("analysis_*.md"))
+            # Phase 2: Try to load manifest if enabled
+            if self.config.use_manifest and manifest_file.exists():
+                self.logger.info("Phase 2: Manifest file found, loading topics from manifest")
+                return self._load_topics_from_manifest(manifest_file)
 
-            # Move files to topics directory
-            moved_files = []
-            for file_path in topic_files:
-                dest_path = self.topics_dir / file_path.name
-                import shutil
-                shutil.move(str(file_path), str(dest_path))
-                moved_files.append(dest_path)
-
-            self.console.print(f"\n[green]✓[/green] Found {len(moved_files)} topic file(s)")
-
-            return sorted(moved_files)
+            # Phase 1: Fall back to file discovery
+            self.logger.info("Phase 1: Using file discovery for topics")
+            return self._discover_topic_files(idea_gen_dir)
 
         finally:
+            self.logger.debug(f"Restoring directory to {original_cwd}")
             os.chdir(original_cwd)
+
+    def _load_topics_from_manifest(self, manifest_file: Path) -> List[Path]:
+        """Load topic files from manifest (Phase 2)"""
+        self.logger.debug(f"Loading manifest from {manifest_file}")
+
+        try:
+            with open(manifest_file, 'r') as f:
+                manifest = json.load(f)
+
+            self.logger.info(f"Manifest loaded successfully: {manifest.get('status', 'unknown')} status")
+
+            # Store manifest for later use
+            self.manifest = manifest
+
+            # Extract topic file paths
+            topic_files = []
+            for topic in manifest.get('topics', []):
+                file_path = Path(topic.get('file'))
+                if file_path.exists():
+                    # Move to session directory if not already there
+                    if file_path.parent != self.topics_dir:
+                        import shutil
+                        dest_path = self.topics_dir / file_path.name
+                        self.logger.debug(f"Moving {file_path} to {dest_path}")
+                        shutil.move(str(file_path.absolute()), str(dest_path))
+                        topic_files.append(dest_path)
+                    else:
+                        topic_files.append(file_path)
+                else:
+                    self.logger.warning(f"Topic file not found: {file_path}")
+
+            self.logger.info(f"Loaded {len(topic_files)} topics from manifest")
+            self.console.print(f"\n[green]✓[/green] Loaded {len(topic_files)} topics from manifest")
+
+            return sorted(topic_files)
+
+        except Exception as e:
+            self.logger.error(f"Failed to load manifest: {e}")
+            self.logger.info("Falling back to file discovery")
+            # Fall back to file discovery
+            return self._discover_topic_files(self.idea_generator_path.parent)
+
+    def _discover_topic_files(self, idea_gen_dir: Path) -> List[Path]:
+        """Discover topic files by pattern matching (Phase 1)"""
+        self.logger.debug("Discovering topic files by pattern matching")
+
+        # Find generated topic files in DocIdeaGenerator directory
+        topic_files = list(idea_gen_dir.glob("topic_*.md"))
+        self.logger.debug(f"Found {len(topic_files)} files matching 'topic_*.md'")
+
+        if not topic_files:
+            # Try alternative patterns
+            self.logger.debug("No files matching 'topic_*.md', trying 'analysis_*.md'")
+            topic_files = list(idea_gen_dir.glob("analysis_*.md"))
+            self.logger.debug(f"Found {len(topic_files)} files matching 'analysis_*.md'")
+
+        # Move files to topics directory
+        moved_files = []
+        for file_path in topic_files:
+            dest_path = self.topics_dir.absolute() / file_path.name
+            import shutil
+            self.logger.debug(f"Moving {file_path.absolute()} to {dest_path}")
+            shutil.move(str(file_path.absolute()), str(dest_path))
+            moved_files.append(dest_path)
+
+        self.logger.info(f"Successfully moved {len(moved_files)} topic files to session directory")
+        self.console.print(f"\n[green]✓[/green] Found {len(moved_files)} topic file(s)")
+
+        return sorted(moved_files)
 
     def _manual_topic_selection(self) -> List[Path]:
         """Allow user to manually specify topic files"""
@@ -273,6 +465,41 @@ class DocOrchestrator:
             return []
 
         # Parse topic files to extract metadata
+        topics = self._parse_topic_files(topic_files)
+
+        # Display topics in a rich table
+        self._display_topics_table(topics)
+
+        # Auto-confirm mode: select all topics
+        if self.auto_confirm:
+            self.logger.info("Auto-confirming: Selecting all topics (--yes flag)")
+            self.console.print(f"\n[green]✓[/green] Auto-selected all {len(topics)} topics")
+            return topics
+
+        # Show preview option
+        self._preview_topics(topics)
+
+        # Interactive selection
+        selected = self._select_topics(topics)
+
+        self.console.print(f"\n[green]✓[/green] Selected {len(selected)} topics")
+        return selected
+
+    def _parse_topic_files(self, topic_files: List[Path]) -> List[Dict]:
+        """Parse topic files to extract metadata
+
+        Phase 2: Uses manifest data if available for richer metadata
+        Phase 1: Falls back to parsing markdown files
+        """
+        self.logger.debug(f"Parsing {len(topic_files)} topic files")
+
+        # Phase 2: If we have manifest data, use it
+        if hasattr(self, 'manifest') and self.manifest:
+            self.logger.info("Phase 2: Using manifest metadata for topic parsing")
+            return self._parse_topics_from_manifest(topic_files)
+
+        # Phase 1: Parse from files
+        self.logger.info("Phase 1: Parsing topics from files")
         topics = []
         for file_path in topic_files:
             with open(file_path, 'r') as f:
@@ -297,8 +524,40 @@ class DocOrchestrator:
                 'quotes_count': min(quotes_count, 10),
                 'size': len(content.split())
             })
+            self.logger.debug(f"Parsed topic: {title} ({len(content.split())} words)")
 
-        # Display topics in a rich table
+        return topics
+
+    def _parse_topics_from_manifest(self, topic_files: List[Path]) -> List[Dict]:
+        """Parse topics using manifest metadata (Phase 2)"""
+        self.logger.debug("Parsing topics from manifest")
+        topics = []
+
+        # Create a mapping of file names to topic data
+        topic_map = {}
+        for topic_data in self.manifest.get('topics', []):
+            file_path = Path(topic_data.get('file'))
+            topic_map[file_path.name] = topic_data
+
+        for file_path in topic_files:
+            # Try to get data from manifest
+            manifest_data = topic_map.get(file_path.name, {})
+
+            topics.append({
+                'file_path': file_path,
+                'title': manifest_data.get('title', file_path.stem.replace('_', ' ').title()),
+                'insights_count': len(manifest_data.get('key_insights', [])),
+                'quotes_count': len(manifest_data.get('notable_quotes', [])),
+                'size': manifest_data.get('word_count', 0),
+                'description': manifest_data.get('description', ''),
+                'manifest_data': manifest_data  # Store full manifest data for later use
+            })
+            self.logger.debug(f"Parsed topic from manifest: {topics[-1]['title']} ({topics[-1]['size']} words)")
+
+        return topics
+
+    def _display_topics_table(self, topics: List[Dict]):
+        """Display topics in a rich table"""
         table = Table(title=f"📋 Generated Topics ({len(topics)} found)", show_header=True)
         table.add_column("#", style="cyan", width=3)
         table.add_column("Title", style="bold")
@@ -315,8 +574,10 @@ class DocOrchestrator:
 
         self.console.print(table)
 
-        # Show preview option
+    def _preview_topics(self, topics: List[Dict]):
+        """Show preview of topics if user requests it"""
         if Confirm.ask("\n[yellow]Would you like to preview topics before selecting?[/yellow]", default=False):
+            self.logger.info("User requested topic preview")
             for i, topic in enumerate(topics, 1):
                 self.console.print(f"\n[bold cyan]{i}. {topic['title']}[/bold cyan]")
                 self.console.print(f"[dim]File: {topic['file_path'].name}[/dim]")
@@ -327,7 +588,8 @@ class DocOrchestrator:
                     if not Confirm.ask("Continue to next topic?", default=True):
                         break
 
-        # Interactive selection using inquirer
+    def _select_topics(self, topics: List[Dict]) -> List[Dict]:
+        """Interactive selection of topics using checkbox interface"""
         self.console.print("\n")
         choices = [
             f"{i}. {topic['title'][:60]}"
@@ -346,6 +608,7 @@ class DocOrchestrator:
         answers = inquirer.prompt(questions)
 
         if not answers or not answers['selected']:
+            self.logger.info("No topics selected by user")
             return []
 
         # Extract selected indices
@@ -355,13 +618,12 @@ class DocOrchestrator:
             selected_indices.append(idx)
 
         selected = [topics[i] for i in selected_indices]
-
-        self.console.print(f"\n[green]✓[/green] Selected {len(selected)} topics")
+        self.logger.info(f"User selected {len(selected)} topics: {[t['title'] for t in selected]}")
 
         return selected
 
-    def _confirm_parameters(self, selected_topics: List[Dict]) -> bool:
-        """Display parameters and get confirmation"""
+    def _display_parameters(self, selected_topics: List[Dict]):
+        """Display document generation parameters"""
         table = Table(title="📝 Document Generation Parameters", show_header=True)
         table.add_column("Parameter", style="cyan")
         table.add_column("Value", style="green")
@@ -380,12 +642,17 @@ class DocOrchestrator:
 
         self.console.print(table)
 
+    def _confirm_parameters(self, selected_topics: List[Dict]) -> bool:
+        """Display parameters and get confirmation"""
+        self._display_parameters(selected_topics)
         return Confirm.ask("\n[bold]Proceed with document generation?[/bold]", default=True)
 
     def _run_stage2(self, selected_topics: List[Dict]) -> List[Dict]:
         """Run PersonalizedDocGenerator for each selected topic"""
+        self.logger.debug("Entering _run_stage2")
         documents = []
         mode = self.config.doc_mode_override or self.config.global_mode
+        self.logger.info(f"Stage 2 will generate {len(selected_topics)} documents using mode: {mode}")
 
         with Progress(console=self.console) as progress:
             task = progress.add_task(
@@ -394,6 +661,7 @@ class DocOrchestrator:
             )
 
             for i, topic in enumerate(selected_topics, 1):
+                self.logger.info(f"Generating document {i}/{len(selected_topics)}: {topic['title']}")
                 progress.update(task, description=f"[cyan]Generating document {i}/{len(selected_topics)}: {topic['title'][:40]}...")
 
                 # Build command
@@ -412,34 +680,50 @@ class DocOrchestrator:
                 if self.config.doc_customer_story:
                     cmd.extend(["--customer-story", self.config.doc_customer_story])
 
-                # Run document generator
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.config.stage2_timeout
-                )
+                self.logger.debug(f"Executing: {' '.join(cmd)}")
 
-                if result.returncode != 0:
-                    self.console.print(f"\n[red]✗ Failed to generate document for: {topic['title']}[/red]")
-                    self.console.print(f"[dim]Error: {result.stderr[:200]}[/dim]")
-                    if not self.config.retry_on_failure:
-                        raise RuntimeError(f"Document generation failed: {result.stderr}")
+                # Run document generator
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.config.stage2_timeout
+                    )
+
+                    if result.returncode != 0:
+                        self.logger.error(f"Document generation failed for '{topic['title']}' with return code {result.returncode}")
+                        self.logger.error(f"stderr: {result.stderr[:500]}")
+                        self.console.print(f"\n[red]✗ Failed to generate document for: {topic['title']}[/red]")
+                        self.console.print(f"[dim]Error: {result.stderr[:200]}[/dim]")
+                        if not self.config.retry_on_failure:
+                            raise RuntimeError(f"Document generation failed: {result.stderr}")
+                        documents.append({
+                            'topic': topic['title'],
+                            'status': 'failed',
+                            'error': result.stderr[:200]
+                        })
+                    else:
+                        self.logger.info(f"Successfully generated document for '{topic['title']}'")
+                        self.logger.debug(f"stdout: {result.stdout[:200]}")
+                        documents.append({
+                            'topic': topic['title'],
+                            'status': 'success',
+                            'output': result.stdout
+                        })
+                except subprocess.TimeoutExpired:
+                    self.logger.error(f"Document generation timed out for '{topic['title']}' after {self.config.stage2_timeout} seconds")
+                    self.console.print(f"\n[red]✗ Timeout generating document for: {topic['title']}[/red]")
                     documents.append({
                         'topic': topic['title'],
                         'status': 'failed',
-                        'error': result.stderr[:200]
-                    })
-                else:
-                    documents.append({
-                        'topic': topic['title'],
-                        'status': 'success',
-                        'output': result.stdout
+                        'error': f'Timeout after {self.config.stage2_timeout} seconds'
                     })
 
                 progress.update(task, advance=1)
 
         successful = len([d for d in documents if d['status'] == 'success'])
+        self.logger.info(f"Stage 2 complete: {successful}/{len(documents)} documents generated successfully")
         self.console.print(f"\n[green]✓[/green] Generated {successful}/{len(documents)} documents successfully")
 
         return documents
@@ -505,10 +789,16 @@ DocIdeaGenerator will run interactively - follow its prompts to generate topics.
         help="Path to YAML configuration file"
     )
 
+    parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Auto-confirm all prompts (non-interactive mode)"
+    )
+
     args = parser.parse_args()
 
     try:
-        orchestrator = DocOrchestrator(args.config)
+        orchestrator = DocOrchestrator(args.config, auto_confirm=args.yes)
         return orchestrator.run()
     except FileNotFoundError as e:
         print(f"Error: {e}")

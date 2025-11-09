@@ -15,6 +15,7 @@ idea_generation:
   # Gmail source options
   start_date: "01012025"  # MMDDYYYY format (optional)
   label: "AIQ"  # Gmail label to filter (optional)
+  email_subject: ""  # Email subject filter - supports partial matching (optional)
 
   # Google Drive source options (only used if source: "drive")
   folder_id: ""  # Google Drive folder ID
@@ -50,3 +51,15 @@ orchestration:
   stage2_timeout: 300  # Timeout per document in seconds (5 minutes)
   retry_on_failure: true  # Continue if a document fails to generate
   save_session: true  # Save session data for debugging/recovery
+
+  # Dependency paths (optional - defaults to ../DocIdeaGenerator and ../PersonalizedDocGenerator)
+  # idea_generator_path: "~/custom/path/to/DocIdeaGenerator/cli.py"
+  # doc_generator_path: "~/custom/path/to/PersonalizedDocGenerator/document_generator.py"
+
+  # Logging configuration
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR (logs to session/orchestrator.log)
+
+  # Phase 2: Manifest-based integration (experimental)
+  # These options enable advanced integration with updated external programs
+  use_manifest: true  # Use JSON manifest if available, fall back to file discovery
+  batch_mode: false  # Run Stage 1 in batch mode (requires DocIdeaGenerator support for --batch flag)
