@@ -46,6 +46,7 @@ class OrchestratorConfig:
     idea_focus: Optional[str]
     idea_folder_id: Optional[str]
     idea_combined_topics: bool
+    idea_fast_mode: bool
 
     # Stage 2: Document Generation
     doc_style: str
@@ -176,6 +177,7 @@ class DocOrchestrator:
             idea_focus=idea_gen.get('focus'),
             idea_folder_id=idea_gen.get('folder_id'),
             idea_combined_topics=idea_gen.get('combined_topics', False),
+            idea_fast_mode=idea_gen.get('fast_mode', False),
 
             # Stage 2
             doc_style=doc_gen.get('style', ''),
@@ -330,6 +332,11 @@ class DocOrchestrator:
                 cmd.append("--yes")
                 self.logger.info("Adding --yes flag to DocIdeaGenerator for auto-confirmation")
 
+            # Add --fast flag if fast mode is enabled
+            if self.config.idea_fast_mode:
+                cmd.append("--fast")
+                self.logger.info("Fast mode enabled - using Gemini 2.5 Flash (300+ tok/s)")
+
             # Add optional arguments
             if self.config.idea_start_date:
                 cmd.extend(["--start-date", self.config.idea_start_date])
@@ -348,11 +355,42 @@ class DocOrchestrator:
             self.console.print(f"[dim]Running: {' '.join(cmd)}[/dim]\n")
 
             # Run (interactive or batch depending on config)
-            result = subprocess.run(cmd, timeout=self.config.stage1_timeout)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.config.stage1_timeout
+            )
 
             if result.returncode != 0:
-                self.logger.error(f"DocIdeaGenerator exited with non-zero code: {result.returncode}")
-                self.console.print(f"[red]Stage 1 exited with code {result.returncode}[/red]")
+                # Parse output for error messages
+                error_details = []
+
+                # Look for error messages in stdout
+                if result.stdout:
+                    for line in result.stdout.split('\n'):
+                        if 'error' in line.lower() or 'failed' in line.lower() or 'blocked' in line.lower():
+                            error_details.append(line.strip())
+
+                # Look for error messages in stderr
+                if result.stderr:
+                    for line in result.stderr.split('\n'):
+                        if 'error' in line.lower() or 'failed' in line.lower() or 'blocked' in line.lower():
+                            error_details.append(line.strip())
+
+                # Build detailed error message
+                if error_details:
+                    error_summary = "\n".join(error_details[:5])  # Show first 5 error lines
+                    self.logger.error(f"DocIdeaGenerator exited with code {result.returncode}. Errors:\n{error_summary}")
+                    self.console.print(f"[red]Stage 1 failed with errors:[/red]\n{error_summary[:200]}")
+                else:
+                    self.logger.error(f"DocIdeaGenerator exited with non-zero code: {result.returncode}")
+                    self.console.print(f"[red]Stage 1 exited with code {result.returncode}[/red]")
+                    # Include last 10 lines of output for debugging
+                    if result.stdout:
+                        last_lines = result.stdout.strip().split('\n')[-10:]
+                        self.logger.debug(f"Last output:\n" + "\n".join(last_lines))
+
                 return []
 
             self.logger.debug("DocIdeaGenerator completed successfully")

@@ -5,7 +5,7 @@ name: "Weekly Content Pipeline"
 
 # Global settings that apply to all stages
 global:
-  mode: "test"  # "test" (Gemini 1.5 Flash - free) or "production" (GPT-4o)
+  mode: "test"  # "test" (Qwen 2.5 32B - local, free) or "production" (Qwen 2.5 32B - local, free)
 
 # Stage 1: Idea Generation (DocIdeaGenerator)
 idea_generation:
@@ -22,6 +22,9 @@ idea_generation:
 
   # Analysis options
   focus: "AI transformation and business strategy"  # Content focus/perspective
+
+  # Speed options
+  fast_mode: false  # true = Gemini 2.5 Flash (300+ tok/s, API cost), false = Qwen 2.5 32B (local, free, ~11 tok/s)
 
   # Output options
   combined_topics: false  # true = one file per transcript, false = one file per topic
