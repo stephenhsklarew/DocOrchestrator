@@ -78,12 +78,21 @@ class OrchestratorConfig:
 class DocOrchestrator:
     """Main orchestrator class"""
 
-    def __init__(self, config_path: str, auto_confirm: bool = False):
-        """Initialize orchestrator with config file"""
+    def __init__(self, config_path: str = None, auto_confirm: bool = False, session_id: str = None, config: OrchestratorConfig = None):
+        """Initialize orchestrator with config file or existing session"""
         self.console = Console()
-        self.config = self._load_config(config_path)
+
+        # Support loading from existing session or new config
+        if config:
+            self.config = config
+        elif config_path:
+            self.config = self._load_config(config_path)
+            self.config_path = config_path
+        else:
+            raise ValueError("Must provide either config_path or config object")
+
         self.auto_confirm = auto_confirm
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         # Use absolute path for session directory to avoid issues when changing working directory
         self.session_dir = (Path.cwd() / "sessions" / self.session_id).absolute()
         self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -508,13 +517,23 @@ class DocOrchestrator:
 
         return files
 
-    def _interactive_review(self, topic_files: List[Path]) -> List[Dict]:
-        """Interactive UI for reviewing and selecting topics"""
-        if not topic_files:
+    def _interactive_review(self, topic_files_or_topics: List) -> List[Dict]:
+        """Interactive UI for reviewing and selecting topics
+
+        Args:
+            topic_files_or_topics: Either a list of Path objects (for full run) or
+                                  a list of topic dictionaries (for review stage)
+        """
+        if not topic_files_or_topics:
             return []
 
-        # Parse topic files to extract metadata
-        topics = self._parse_topic_files(topic_files)
+        # Check if we received Path objects or already-parsed topics
+        if isinstance(topic_files_or_topics[0], Path):
+            # Parse topic files to extract metadata
+            topics = self._parse_topic_files(topic_files_or_topics)
+        else:
+            # Already have parsed topics (from review stage)
+            topics = topic_files_or_topics
 
         # Display topics in a rich table
         self._display_topics_table(topics)
@@ -814,6 +833,402 @@ class DocOrchestrator:
 
             self.console.print(f"\n[dim]Session saved to: {session_file}[/dim]")
 
+    # ===== SESSION STATE MANAGEMENT =====
+
+    def _get_session_state_file(self, session_id: str = None) -> Path:
+        """Get path to session state file"""
+        sid = session_id or self.session_id
+        return Path.cwd() / "sessions" / sid / "session_state.json"
+
+    def _get_pending_index_file(self) -> Path:
+        """Get path to pending sessions index"""
+        return Path.cwd() / "sessions" / "pending_reviews.json"
+
+    def _save_session_state(self, stage: str, topics: List[Dict] = None, selected_topics: List[Dict] = None, documents: List[Dict] = None):
+        """Save current session state"""
+        state_file = self._get_session_state_file()
+
+        state = {
+            'session_id': self.session_id,
+            'config_file': getattr(self, 'config_path', None),
+            'config_snapshot': asdict(self.config),
+            'stage': stage,
+            'created_at': state_file.exists() and json.loads(state_file.read_text()).get('created_at') or datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat(),
+            'topics': topics or [],
+            'selected_topics': selected_topics,
+            'generated_documents': documents or []
+        }
+
+        with open(state_file, 'w') as f:
+            json.dump(state, f, indent=2, default=str)
+
+        self.logger.info(f"Session state saved: stage={stage}, session={self.session_id}")
+
+    def _load_session_state(self, session_id: str) -> Dict:
+        """Load session state from file"""
+        state_file = self._get_session_state_file(session_id)
+
+        if not state_file.exists():
+            raise FileNotFoundError(f"Session {session_id} not found at {state_file}")
+
+        with open(state_file, 'r') as f:
+            state = json.load(f)
+
+        self.logger.info(f"Loaded session state: stage={state['stage']}, session={session_id}")
+        return state
+
+    def _add_to_pending_reviews(self):
+        """Add session to pending reviews index"""
+        index_file = self._get_pending_index_file()
+
+        # Load existing index
+        if index_file.exists():
+            with open(index_file, 'r') as f:
+                index = json.load(f)
+        else:
+            index = {'pending_reviews': [], 'reviewed_awaiting_generation': []}
+
+        # Add to pending reviews
+        index['pending_reviews'].append({
+            'session_id': self.session_id,
+            'created_at': datetime.now().isoformat(),
+            'topic_count': len(self._parse_topic_files(list(self.topics_dir.glob("topic_*.md")))),
+            'config_name': self.config.name
+        })
+
+        # Write index
+        index_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(index_file, 'w') as f:
+            json.dump(index, f, indent=2)
+
+        self.logger.info(f"Added session {self.session_id} to pending reviews")
+
+    def _move_to_awaiting_generation(self, session_id: str, selected_count: int):
+        """Move session from pending reviews to awaiting generation"""
+        index_file = self._get_pending_index_file()
+
+        if not index_file.exists():
+            return
+
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+
+        # Remove from pending reviews
+        index['pending_reviews'] = [s for s in index['pending_reviews'] if s['session_id'] != session_id]
+
+        # Add to awaiting generation
+        index['reviewed_awaiting_generation'].append({
+            'session_id': session_id,
+            'reviewed_at': datetime.now().isoformat(),
+            'selected_count': selected_count
+        })
+
+        with open(index_file, 'w') as f:
+            json.dump(index, f, indent=2)
+
+        self.logger.info(f"Moved session {session_id} to awaiting generation")
+
+    def _remove_from_awaiting_generation(self, session_id: str):
+        """Remove session from awaiting generation after docs are created"""
+        index_file = self._get_pending_index_file()
+
+        if not index_file.exists():
+            return
+
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+
+        # Remove from awaiting generation
+        index['reviewed_awaiting_generation'] = [s for s in index['reviewed_awaiting_generation'] if s['session_id'] != session_id]
+
+        with open(index_file, 'w') as f:
+            json.dump(index, f, indent=2)
+
+        self.logger.info(f"Removed session {session_id} from awaiting generation (completed)")
+
+    # ===== STAGED EXECUTION METHODS =====
+
+    def run_generate_ideas(self):
+        """Stage 1: Generate ideas only"""
+        self.logger.info(f"Starting staged execution - Stage 1: Idea Generation")
+        self.console.print(Panel.fit(
+            f"[bold cyan]{self.config.name}[/bold cyan]\n"
+            f"Mode: [yellow]{self.config.global_mode}[/yellow]\n"
+            f"Session: [dim]{self.session_id}[/dim]\n"
+            f"Stage: [green]1 - Generate Ideas[/green]",
+            title="🚀 DocOrchestrator - Staged Execution"
+        ))
+
+        try:
+            # Run Stage 1
+            self.console.print("\n[bold]Stage 1: Generating Topic Ideas[/bold]")
+            topic_files = self._run_stage1()
+
+            if not topic_files:
+                self.logger.warning("No topic files generated")
+                self.console.print("[yellow]No topic files generated. Exiting.[/yellow]")
+                return 1
+
+            # Parse topics for state
+            topics = self._parse_topic_files(topic_files)
+
+            # Save session state
+            self._save_session_state(stage="ideas_generated", topics=topics)
+            self._add_to_pending_reviews()
+
+            # Summary
+            self.console.print(f"\n[green]✓[/green] Generated {len(topics)} topic(s)")
+            self.console.print(f"[cyan]Session ID:[/cyan] {self.session_id}")
+            self.console.print(f"[dim]Use this command to review: python orchestrator.py --review --session {self.session_id}[/dim]")
+
+            return 0
+
+        except Exception as e:
+            self.logger.error(f"Error in idea generation: {e}", exc_info=True)
+            self.console.print(f"\n[red]Error: {e}[/red]")
+            return 1
+
+    def run_review_session(self, session_id: str):
+        """Stage 2: Review a single session"""
+        self.logger.info(f"Starting staged execution - Stage 2: Review Session {session_id}")
+
+        try:
+            # Load session state
+            state = self._load_session_state(session_id)
+
+            if state['stage'] != 'ideas_generated':
+                self.console.print(f"[yellow]Warning: Session {session_id} is in stage '{state['stage']}', not 'ideas_generated'[/yellow]")
+                if state['stage'] == 'reviewed':
+                    self.console.print(f"[dim]Session already reviewed. Use --generate-docs to create documents.[/dim]")
+                    return 0
+                elif state['stage'] == 'completed':
+                    self.console.print(f"[dim]Session already completed.[/dim]")
+                    return 0
+
+            # Load config from state
+            self.config = OrchestratorConfig(**state['config_snapshot'])
+            self.session_id = session_id
+            self.session_dir = Path.cwd() / "sessions" / session_id
+
+            # Display session info
+            self.console.print(Panel.fit(
+                f"[bold cyan]{self.config.name}[/bold cyan]\n"
+                f"Session: [dim]{session_id}[/dim]\n"
+                f"Created: [dim]{state['created_at']}[/dim]\n"
+                f"Topics: [yellow]{len(state['topics'])}[/yellow]\n"
+                f"Stage: [green]2 - Review & Select[/green]",
+                title="🚀 DocOrchestrator - Review Session"
+            ))
+
+            # Reconstruct topic objects with file paths
+            topics = []
+            for topic_data in state['topics']:
+                topics.append({
+                    'file_path': Path(topic_data['file_path']),
+                    'title': topic_data['title'],
+                    'size': topic_data['size'],
+                    'insights_count': topic_data.get('insights_count', 0),
+                    'quotes_count': topic_data.get('quotes_count', 0)
+                })
+
+            # Interactive review
+            self.console.print(f"\n[bold]Stage 2: Review and Select Topics[/bold]")
+            selected_topics = self._interactive_review(topics)
+
+            if not selected_topics:
+                self.logger.info("No topics selected by user")
+                self.console.print("[yellow]No topics selected. Session remains in 'ideas_generated' stage.[/yellow]")
+                return 0
+
+            # Save updated state
+            self._save_session_state(
+                stage="reviewed",
+                topics=state['topics'],
+                selected_topics=[{'title': t['title'], 'file_path': str(t['file_path'])} for t in selected_topics]
+            )
+            self._move_to_awaiting_generation(session_id, len(selected_topics))
+
+            # Summary
+            self.console.print(f"\n[green]✓[/green] Selected {len(selected_topics)} topic(s) for document generation")
+            self.console.print(f"[dim]Use this command to generate documents: python orchestrator.py --generate-docs --session {session_id}[/dim]")
+
+            return 0
+
+        except Exception as e:
+            self.logger.error(f"Error in review: {e}", exc_info=True)
+            self.console.print(f"\n[red]Error: {e}[/red]")
+            return 1
+
+    def run_generate_documents(self, session_id: str):
+        """Stage 3: Generate documents from reviewed session"""
+        self.logger.info(f"Starting staged execution - Stage 3: Generate Documents for Session {session_id}")
+
+        try:
+            # Load session state
+            state = self._load_session_state(session_id)
+
+            if state['stage'] != 'reviewed':
+                self.console.print(f"[red]Error: Session {session_id} is in stage '{state['stage']}', expected 'reviewed'[/red]")
+                if state['stage'] == 'ideas_generated':
+                    self.console.print(f"[dim]Session not yet reviewed. Use --review to select topics first.[/dim]")
+                elif state['stage'] == 'completed':
+                    self.console.print(f"[dim]Session already completed.[/dim]")
+                return 1
+
+            # Load config from state
+            self.config = OrchestratorConfig(**state['config_snapshot'])
+            self.session_id = session_id
+            self.session_dir = Path.cwd() / "sessions" / session_id
+
+            # Display session info
+            self.console.print(Panel.fit(
+                f"[bold cyan]{self.config.name}[/bold cyan]\n"
+                f"Session: [dim]{session_id}[/dim]\n"
+                f"Selected Topics: [yellow]{len(state['selected_topics'])}[/yellow]\n"
+                f"Stage: [green]3 - Generate Documents[/green]",
+                title="🚀 DocOrchestrator - Generate Documents"
+            ))
+
+            # Reconstruct selected topics with file paths
+            selected_topics = []
+            for topic_data in state['selected_topics']:
+                selected_topics.append({
+                    'title': topic_data['title'],
+                    'file_path': Path(topic_data['file_path'])
+                })
+
+            # Generate documents
+            self.console.print(f"\n[bold]Stage 3: Generating Documents[/bold]")
+            documents = self._run_stage2(selected_topics)
+
+            # Save updated state
+            self._save_session_state(
+                stage="completed",
+                topics=state['topics'],
+                selected_topics=state['selected_topics'],
+                documents=documents
+            )
+            self._remove_from_awaiting_generation(session_id)
+
+            # Summary
+            successful = len([d for d in documents if d['status'] == 'success'])
+            self.console.print(f"\n[green]✓[/green] Generated {successful}/{len(documents)} document(s) successfully")
+            self.console.print(f"[cyan]Session completed:[/cyan] {session_id}")
+
+            return 0
+
+        except Exception as e:
+            self.logger.error(f"Error in document generation: {e}", exc_info=True)
+            self.console.print(f"\n[red]Error: {e}[/red]")
+            return 1
+
+    # ===== CLASS METHODS FOR SESSION MANAGEMENT =====
+
+    @classmethod
+    def from_session(cls, session_id: str, auto_confirm: bool = False):
+        """Create orchestrator from existing session"""
+        state_file = Path.cwd() / "sessions" / session_id / "session_state.json"
+
+        if not state_file.exists():
+            raise FileNotFoundError(f"Session {session_id} not found")
+
+        with open(state_file, 'r') as f:
+            state = json.load(f)
+
+        # Reconstruct config
+        config = OrchestratorConfig(**state['config_snapshot'])
+
+        return cls(config=config, auto_confirm=auto_confirm, session_id=session_id)
+
+    @classmethod
+    def list_pending_sessions(cls):
+        """List all sessions pending review"""
+        console = Console()
+        index_file = Path.cwd() / "sessions" / "pending_reviews.json"
+
+        if not index_file.exists():
+            console.print("[yellow]No pending sessions found.[/yellow]")
+            return
+
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+
+        pending = index.get('pending_reviews', [])
+
+        if not pending:
+            console.print("[yellow]No sessions pending review.[/yellow]")
+            return
+
+        table = Table(title=f"📋 Pending Reviews ({len(pending)} sessions)")
+        table.add_column("Session ID", style="cyan")
+        table.add_column("Created", style="dim")
+        table.add_column("Topics", justify="right")
+        table.add_column("Config Name", style="green")
+
+        for session in pending:
+            created = datetime.fromisoformat(session['created_at']).strftime("%Y-%m-%d %H:%M")
+            table.add_row(
+                session['session_id'],
+                created,
+                str(session['topic_count']),
+                session['config_name']
+            )
+
+        console.print(table)
+        console.print(f"\n[dim]Review a session: python orchestrator.py --review --session <SESSION_ID>[/dim]")
+
+    @classmethod
+    def list_all_sessions(cls):
+        """List all sessions with their status"""
+        console = Console()
+        sessions_dir = Path.cwd() / "sessions"
+
+        if not sessions_dir.exists():
+            console.print("[yellow]No sessions found.[/yellow]")
+            return
+
+        # Collect all sessions
+        sessions = []
+        for session_dir in sorted(sessions_dir.iterdir()):
+            if not session_dir.is_dir() or session_dir.name == '__pycache__':
+                continue
+
+            state_file = session_dir / "session_state.json"
+            if state_file.exists():
+                with open(state_file, 'r') as f:
+                    state = json.load(f)
+                    sessions.append(state)
+
+        if not sessions:
+            console.print("[yellow]No sessions with state found.[/yellow]")
+            return
+
+        table = Table(title=f"📊 All Sessions ({len(sessions)} total)")
+        table.add_column("Session ID", style="cyan")
+        table.add_column("Stage", style="yellow")
+        table.add_column("Topics", justify="right")
+        table.add_column("Selected", justify="right")
+        table.add_column("Updated", style="dim")
+
+        for state in sessions:
+            updated = datetime.fromisoformat(state['updated_at']).strftime("%Y-%m-%d %H:%M")
+            stage_display = {
+                'ideas_generated': '1️⃣  Ideas',
+                'reviewed': '2️⃣  Reviewed',
+                'completed': '✅ Complete'
+            }.get(state['stage'], state['stage'])
+
+            table.add_row(
+                state['session_id'],
+                stage_display,
+                str(len(state.get('topics', []))),
+                str(len(state.get('selected_topics', []))) if state.get('selected_topics') else '-',
+                updated
+            )
+
+        console.print(table)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -821,21 +1236,33 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run with config file
+  # FULL SEQUENTIAL MODE (default - unchanged behavior)
   python orchestrator.py --config my_pipeline.yaml
 
-  # Use example config
-  python orchestrator.py --config config.example.yaml
+  # STAGED EXECUTION MODE
 
-Note: This is Phase 1 implementation using file-based integration.
-DocIdeaGenerator will run interactively - follow its prompts to generate topics.
+  # Stage 1: Generate ideas only
+  python orchestrator.py --config my_pipeline.yaml --generate-ideas
+
+  # Stage 2: Review pending ideas
+  python orchestrator.py --review --session 20251111_120000
+
+  # Stage 3: Generate documents from reviewed session
+  python orchestrator.py --generate-docs --session 20251111_120000
+
+  # UTILITY COMMANDS
+
+  # List sessions pending review
+  python orchestrator.py --list-pending
+
+  # List all sessions with status
+  python orchestrator.py --list-sessions
         """
     )
 
     parser.add_argument(
         "-c", "--config",
-        required=True,
-        help="Path to YAML configuration file"
+        help="Path to YAML configuration file (required for full/generate-ideas mode)"
     )
 
     parser.add_argument(
@@ -844,11 +1271,78 @@ DocIdeaGenerator will run interactively - follow its prompts to generate topics.
         help="Auto-confirm all prompts (non-interactive mode)"
     )
 
+    # Execution modes (mutually exclusive)
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--generate-ideas",
+        action="store_true",
+        help="Stage 1: Generate ideas only (creates session)"
+    )
+    mode_group.add_argument(
+        "--review",
+        action="store_true",
+        help="Stage 2: Review pending ideas"
+    )
+    mode_group.add_argument(
+        "--generate-docs",
+        action="store_true",
+        help="Stage 3: Generate documents from reviewed session"
+    )
+    mode_group.add_argument(
+        "--list-pending",
+        action="store_true",
+        help="List sessions pending review"
+    )
+    mode_group.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="List all sessions with status"
+    )
+
+    # Session selection
+    parser.add_argument(
+        "--session",
+        help="Specific session ID (required for --review and --generate-docs)"
+    )
+
     args = parser.parse_args()
 
     try:
+        # Utility commands (no config needed)
+        if args.list_pending:
+            DocOrchestrator.list_pending_sessions()
+            return 0
+
+        if args.list_sessions:
+            DocOrchestrator.list_all_sessions()
+            return 0
+
+        # Staged execution modes
+        if args.generate_ideas:
+            if not args.config:
+                parser.error("--generate-ideas requires --config")
+            orchestrator = DocOrchestrator(args.config, auto_confirm=args.yes)
+            return orchestrator.run_generate_ideas()
+
+        if args.review:
+            if not args.session:
+                parser.error("--review requires --session")
+            # Create minimal orchestrator for review
+            orchestrator = DocOrchestrator.from_session(args.session, auto_confirm=args.yes)
+            return orchestrator.run_review_session(args.session)
+
+        if args.generate_docs:
+            if not args.session:
+                parser.error("--generate-docs requires --session")
+            orchestrator = DocOrchestrator.from_session(args.session, auto_confirm=args.yes)
+            return orchestrator.run_generate_documents(args.session)
+
+        # Default: full sequential mode
+        if not args.config:
+            parser.error("--config is required for full sequential mode")
         orchestrator = DocOrchestrator(args.config, auto_confirm=args.yes)
         return orchestrator.run()
+
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 1
