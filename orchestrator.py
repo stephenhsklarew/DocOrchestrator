@@ -355,12 +355,23 @@ class DocOrchestrator:
             self.console.print(f"[dim]Running: {' '.join(cmd)}[/dim]\n")
 
             # Run (interactive or batch depending on config)
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.config.stage1_timeout
-            )
+            # Only capture output in batch mode; let it flow through in interactive mode
+            if self.config.batch_mode:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.stage1_timeout
+                )
+            else:
+                # Interactive mode - don't capture output so errors are visible
+                result = subprocess.run(
+                    cmd,
+                    timeout=self.config.stage1_timeout
+                )
+                # Create a fake result object with empty stdout/stderr for compatibility
+                result.stdout = ""
+                result.stderr = ""
 
             if result.returncode != 0:
                 # Parse output for error messages
