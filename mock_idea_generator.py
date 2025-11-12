@@ -53,6 +53,7 @@ def main():
     parser.add_argument('--combined-topics', action='store_true')
     parser.add_argument('--batch', action='store_true')
     parser.add_argument('--output-manifest', help='Output manifest file')
+    parser.add_argument('--select-all', action='store_true', help='Auto-select all transcripts without prompting')
 
     args = parser.parse_args()
 

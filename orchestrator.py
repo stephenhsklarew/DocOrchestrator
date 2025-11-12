@@ -73,6 +73,7 @@ class OrchestratorConfig:
     # Phase 2: Manifest-based integration
     use_manifest: bool = True  # Use manifest if available, fall back to file discovery
     batch_mode: bool = False  # Run Stage 1 in batch mode (requires external program support)
+    idea_select_all: bool = True  # Auto-select all transcripts (for scheduled/automated runs)
 
 
 class DocOrchestrator:
@@ -187,6 +188,7 @@ class DocOrchestrator:
             idea_folder_id=idea_gen.get('folder_id'),
             idea_combined_topics=idea_gen.get('combined_topics', False),
             idea_fast_mode=idea_gen.get('fast_mode', False),
+            idea_select_all=idea_gen.get('select_all', True),
 
             # Stage 2
             doc_style=doc_gen.get('style', ''),
@@ -340,6 +342,11 @@ class DocOrchestrator:
             if self.auto_confirm:
                 cmd.append("--yes")
                 self.logger.info("Adding --yes flag to DocIdeaGenerator for auto-confirmation")
+
+            # Add --select-all flag to auto-select all transcripts (for scheduled/automated runs)
+            if self.config.idea_select_all:
+                cmd.append("--select-all")
+                self.logger.info("Adding --select-all flag to auto-select all transcripts")
 
             # Add --fast flag if fast mode is enabled
             if self.config.idea_fast_mode:
@@ -573,12 +580,33 @@ class DocOrchestrator:
             with open(file_path, 'r') as f:
                 content = f.read()
 
-            # Extract title (first heading)
+            # Extract title - look for "## TOPIC N:" pattern first, then fall back to first heading
             lines = content.split('\n')
             title = file_path.stem.replace('_', ' ').title()
+
+            # First try to find "## TOPIC N:" heading
             for line in lines:
-                if line.startswith('#'):
-                    title = line.lstrip('#').strip()
+                if line.strip().startswith('## TOPIC'):
+                    # Extract everything after "## TOPIC N:"
+                    title = line.split(':', 1)[-1].strip()
+                    break
+            else:
+                # Fall back to first heading if no TOPIC heading found
+                for line in lines:
+                    if line.startswith('#'):
+                        title = line.lstrip('#').strip()
+                        break
+
+            # Extract description (look for "**Description:**" line)
+            description = ""
+            for i, line in enumerate(lines):
+                if line.strip().startswith('**Description:**'):
+                    # Get the description text after the label
+                    desc_text = line.split('**Description:**', 1)[-1].strip()
+                    # If description continues on next lines, include them too
+                    if not desc_text and i + 1 < len(lines):
+                        desc_text = lines[i + 1].strip()
+                    description = desc_text
                     break
 
             # Count insights and quotes
@@ -588,6 +616,7 @@ class DocOrchestrator:
             topics.append({
                 'file_path': file_path,
                 'title': title,
+                'description': description,
                 'insights_count': min(insights_count, 10),  # Cap display at reasonable number
                 'quotes_count': min(quotes_count, 10),
                 'size': len(content.split())
@@ -626,17 +655,20 @@ class DocOrchestrator:
 
     def _display_topics_table(self, topics: List[Dict]):
         """Display topics in a rich table"""
-        table = Table(title=f"📋 Generated Topics ({len(topics)} found)", show_header=True)
+        table = Table(title=f"📋 Generated Topics ({len(topics)} found)", show_header=True, show_lines=True)
         table.add_column("#", style="cyan", width=3)
-        table.add_column("Title", style="bold")
-        table.add_column("File", style="dim", width=30)
+        table.add_column("Title", style="bold", width=40)
+        table.add_column("Description", style="dim", width=60)
         table.add_column("Words", justify="right", width=7)
 
         for i, topic in enumerate(topics, 1):
+            desc = topic.get('description', '')
+            desc_preview = desc[:80] + '...' if len(desc) > 80 else desc
+
             table.add_row(
                 str(i),
-                topic['title'][:50],
-                topic['file_path'].name[:28],
+                topic['title'][:38],
+                desc_preview,
                 str(topic['size'])
             )
 
@@ -659,10 +691,20 @@ class DocOrchestrator:
     def _select_topics(self, topics: List[Dict]) -> List[Dict]:
         """Interactive selection of topics using checkbox interface"""
         self.console.print("\n")
-        choices = [
-            f"{i}. {topic['title'][:60]}"
-            for i, topic in enumerate(topics, 1)
-        ]
+        choices = []
+        for i, topic in enumerate(topics, 1):
+            # Build choice text with title and description preview
+            title = topic['title'][:70]
+            desc = topic.get('description', '')
+
+            if desc:
+                # Show first 100 chars of description
+                desc_preview = desc[:100] + '...' if len(desc) > 100 else desc
+                choice_text = f"{i}. {title}\n   → {desc_preview}"
+            else:
+                choice_text = f"{i}. {title}"
+
+            choices.append(choice_text)
 
         questions = [
             inquirer.Checkbox(
@@ -833,6 +875,13 @@ class DocOrchestrator:
 
             self.console.print(f"\n[dim]Session saved to: {session_file}[/dim]")
 
+        # Send notification
+        if successful > 0:
+            output_dir = Path(self.config.doc_output)
+            if not output_dir.is_absolute():
+                output_dir = Path.cwd() / output_dir
+            self._send_document_notification(self.session_id, successful, output_dir)
+
     # ===== SESSION STATE MANAGEMENT =====
 
     def _get_session_state_file(self, session_id: str = None) -> Path:
@@ -946,6 +995,139 @@ class DocOrchestrator:
             json.dump(index, f, indent=2)
 
         self.logger.info(f"Removed session {session_id} from awaiting generation (completed)")
+
+    def _send_document_notification(self, session_id: str, document_count: int, output_dir: Path):
+        """Send notification (Slack or desktop) when documents are generated"""
+        # Load notification settings from scheduler config if available
+        scheduler_config_path = Path.cwd().parent / 'DocOrchestrationScheduler' / 'schedules.yaml'
+        notification_type = 'desktop'  # Default fallback
+        slack_webhook = None
+
+        if scheduler_config_path.exists():
+            try:
+                with open(scheduler_config_path, 'r') as f:
+                    scheduler_config = yaml.safe_load(f)
+                    notifications = scheduler_config.get('notifications', {})
+                    if notifications.get('enabled', False):
+                        notification_type = notifications.get('type', 'slack')
+                        slack_webhook = notifications.get('slack', {}).get('webhook_url')
+            except Exception as e:
+                self.logger.warning(f"Failed to load scheduler config for notifications: {e}")
+
+        # Send appropriate notification
+        if notification_type == 'slack' and slack_webhook:
+            self._send_slack_document_notification(session_id, document_count, output_dir, slack_webhook)
+        else:
+            self._send_desktop_document_notification(session_id, document_count, output_dir)
+
+    def _send_slack_document_notification(self, session_id: str, document_count: int, output_dir: Path, webhook_url: str):
+        """Send Slack notification for document completion"""
+        try:
+            import requests
+        except ImportError:
+            self.logger.warning("requests module not installed. Skipping Slack notification.")
+            return
+
+        # Build Slack message with action button
+        view_docs_url = f"qwilo://view-documents?session={session_id}"
+
+        message = {
+            "text": f"📄 *Blog Posts Generated!*",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "📄 Blog Posts Generated!",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Documents Created:*\n{document_count}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Session ID:*\n`{session_id}`"
+                        }
+                    ]
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "📁 Open Documents Folder",
+                                "emoji": True
+                            },
+                            "url": view_docs_url,
+                            "style": "primary"
+                        }
+                    ]
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"_Output Location: `{output_dir}`_"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        try:
+            response = requests.post(webhook_url, json=message, timeout=10)
+            if response.status_code == 200:
+                self.logger.info(f"Slack document notification sent for session {session_id}")
+            else:
+                self.logger.warning(f"Slack document notification failed: HTTP {response.status_code}")
+        except Exception as e:
+            self.logger.warning(f"Failed to send Slack document notification: {e}")
+
+    def _send_desktop_document_notification(self, session_id: str, document_count: int, output_dir: Path):
+        """Send desktop notification for document completion"""
+        try:
+            # Find Qwilo logo
+            logo_path = Path(__file__).parent.parent / 'DocIdeaGenerator' / 'qwilo_logo.png'
+
+            # Build notification command
+            cmd = [
+                'terminal-notifier',
+                '-title', '📄 Blog Posts Generated!',
+                '-message', f'Generated {document_count} blog post(s)! 👆 Click to open folder.\n\nSession: {session_id}',
+                '-sound', 'default',
+                '-timeout', '30',
+                '-execute', f'open "{output_dir.absolute()}"'
+            ]
+
+            # Add logo if it exists
+            if logo_path.exists():
+                cmd.extend(['-contentImage', str(logo_path)])
+
+            # Send notification
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0:
+                self.logger.info(f"Desktop document notification sent for session {session_id}")
+            else:
+                self.logger.warning(f"Failed to send desktop document notification: {result.stderr}")
+
+        except FileNotFoundError:
+            self.logger.warning("terminal-notifier not found. Skipping notification.")
+        except Exception as e:
+            self.logger.warning(f"Error sending desktop document notification: {e}")
 
     # ===== STAGED EXECUTION METHODS =====
 
@@ -1116,6 +1298,13 @@ class DocOrchestrator:
             self.console.print(f"\n[green]✓[/green] Generated {successful}/{len(documents)} document(s) successfully")
             self.console.print(f"[cyan]Session completed:[/cyan] {session_id}")
 
+            # Send notification
+            if successful > 0:
+                output_dir = Path(self.config.doc_output)
+                if not output_dir.is_absolute():
+                    output_dir = Path.cwd() / output_dir
+                self._send_document_notification(session_id, successful, output_dir)
+
             return 0
 
         except Exception as e:
@@ -1229,6 +1418,61 @@ class DocOrchestrator:
 
         console.print(table)
 
+    @classmethod
+    def generate_all_pending_documents(cls):
+        """Generate documents for all sessions awaiting generation (automated mode)"""
+        console = Console()
+        index_file = Path.cwd() / "sessions" / "pending_reviews.json"
+
+        if not index_file.exists():
+            console.print("[yellow]No pending reviews index found.[/yellow]")
+            return 0
+
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+
+        awaiting = index.get('reviewed_awaiting_generation', [])
+
+        if not awaiting:
+            console.print("[dim]No sessions awaiting document generation.[/dim]")
+            return 0
+
+        console.print(f"\n[bold cyan]Found {len(awaiting)} session(s) awaiting document generation[/bold cyan]\n")
+
+        success_count = 0
+        failed_count = 0
+
+        for session_info in awaiting:
+            session_id = session_info['session_id']
+            topic_count = session_info.get('selected_count', 0)
+
+            console.print(f"[cyan]Processing session {session_id}[/cyan] ({topic_count} topics)")
+
+            try:
+                # Create orchestrator from session
+                orchestrator = cls.from_session(session_id, auto_confirm=True)
+                result = orchestrator.run_generate_documents(session_id)
+
+                if result == 0:
+                    success_count += 1
+                    console.print(f"[green]✓ Session {session_id} completed[/green]\n")
+                else:
+                    failed_count += 1
+                    console.print(f"[red]✗ Session {session_id} failed[/red]\n")
+
+            except Exception as e:
+                failed_count += 1
+                console.print(f"[red]✗ Error processing session {session_id}: {e}[/red]\n")
+                import traceback
+                traceback.print_exc()
+
+        # Summary
+        console.print(f"\n[bold]Summary:[/bold]")
+        console.print(f"  Successful: [green]{success_count}[/green]")
+        console.print(f"  Failed: [red]{failed_count}[/red]")
+
+        return 0 if failed_count == 0 else 1
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1298,6 +1542,11 @@ Examples:
         action="store_true",
         help="List all sessions with status"
     )
+    mode_group.add_argument(
+        "--generate-all-pending",
+        action="store_true",
+        help="Generate documents for all sessions awaiting generation (automated mode)"
+    )
 
     # Session selection
     parser.add_argument(
@@ -1316,6 +1565,9 @@ Examples:
         if args.list_sessions:
             DocOrchestrator.list_all_sessions()
             return 0
+
+        if args.generate_all_pending:
+            return DocOrchestrator.generate_all_pending_documents()
 
         # Staged execution modes
         if args.generate_ideas:
