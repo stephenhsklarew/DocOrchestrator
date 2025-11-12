@@ -657,17 +657,17 @@ class DocOrchestrator:
         """Display topics in a rich table"""
         table = Table(title=f"📋 Generated Topics ({len(topics)} found)", show_header=True, show_lines=True)
         table.add_column("#", style="cyan", width=3)
-        table.add_column("Title", style="bold", width=40)
-        table.add_column("Description", style="dim", width=60)
+        table.add_column("Title", style="bold", width=35)
+        table.add_column("Description", style="dim", width=110)
         table.add_column("Words", justify="right", width=7)
 
         for i, topic in enumerate(topics, 1):
             desc = topic.get('description', '')
-            desc_preview = desc[:80] + '...' if len(desc) > 80 else desc
+            desc_preview = desc[:160] + '...' if len(desc) > 160 else desc
 
             table.add_row(
                 str(i),
-                topic['title'][:38],
+                topic['title'][:33],
                 desc_preview,
                 str(topic['size'])
             )
@@ -698,8 +698,8 @@ class DocOrchestrator:
             desc = topic.get('description', '')
 
             if desc:
-                # Show first 100 chars of description
-                desc_preview = desc[:100] + '...' if len(desc) > 100 else desc
+                # Show first 160 chars of description
+                desc_preview = desc[:160] + '...' if len(desc) > 160 else desc
                 choice_text = f"{i}. {title}\n   → {desc_preview}"
             else:
                 choice_text = f"{i}. {title}"
