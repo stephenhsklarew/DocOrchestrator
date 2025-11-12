@@ -1032,13 +1032,13 @@ class DocOrchestrator:
         view_docs_url = f"qwilo://view-documents?session={session_id}"
 
         message = {
-            "text": f"📄 *Blog Posts Generated!*",
+            "text": f"📄 *New Content Generated!*",
             "blocks": [
                 {
                     "type": "header",
                     "text": {
                         "type": "plain_text",
-                        "text": "📄 Blog Posts Generated!",
+                        "text": "📄 New Content Generated!",
                         "emoji": True
                     }
                 },
@@ -1100,8 +1100,8 @@ class DocOrchestrator:
             # Build notification command
             cmd = [
                 'terminal-notifier',
-                '-title', '📄 Blog Posts Generated!',
-                '-message', f'Generated {document_count} blog post(s)! 👆 Click to open folder.\n\nSession: {session_id}',
+                '-title', '📄 New Content Generated!',
+                '-message', f'Generated {document_count} new content piece(s)! 👆 Click to open folder.\n\nSession: {session_id}',
                 '-sound', 'default',
                 '-timeout', '30',
                 '-execute', f'open "{output_dir.absolute()}"'
