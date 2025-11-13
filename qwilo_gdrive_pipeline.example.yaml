@@ -37,5 +37,5 @@ orchestration:
   retry_on_failure: true
   save_session: true
   log_level: "INFO" # INFO level logging
-  use_manifest: true # Use manifest if available
+  use_manifest: false # Manifest mode not yet fully implemented
   batch_mode: true # Batch mode for automated/scheduled runs
