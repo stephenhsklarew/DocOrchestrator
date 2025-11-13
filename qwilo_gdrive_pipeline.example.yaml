@@ -14,6 +14,7 @@ idea_generation:
   focus: "AI strategy and innovation"
   fast_mode: false # false = Qwen 2.5 32B (local, ~11 tok/s), true = Gemini 2.5 Flash (cloud, 300+ tok/s)
   combined_topics: false # Save each topic separately
+  select_all: true # Auto-select all documents for scheduled/automated runs
 
 # Stage 2: Document Generation
 document_generation:
@@ -37,4 +38,4 @@ orchestration:
   save_session: true
   log_level: "INFO" # INFO level logging
   use_manifest: true # Use manifest if available
-  batch_mode: false # Interactive mode
+  batch_mode: true # Batch mode for automated/scheduled runs
