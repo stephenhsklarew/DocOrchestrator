@@ -602,16 +602,28 @@ class DocOrchestrator:
                         title = line.lstrip('#').strip()
                         break
 
-            # Extract description (look for "**Description:**" line)
+            # Extract description (look for "**Description:**" line and read full paragraph)
             description = ""
             for i, line in enumerate(lines):
                 if line.strip().startswith('**Description:**'):
-                    # Get the description text after the label
+                    # Get the description text after the label on this line
+                    desc_parts = []
                     desc_text = line.split('**Description:**', 1)[-1].strip()
-                    # If description continues on next lines, include them too
-                    if not desc_text and i + 1 < len(lines):
-                        desc_text = lines[i + 1].strip()
-                    description = desc_text
+                    if desc_text:
+                        desc_parts.append(desc_text)
+
+                    # Continue reading lines until we hit another section or blank line
+                    for j in range(i + 1, len(lines)):
+                        next_line = lines[j].strip()
+                        # Stop if we hit another markdown section or blank line after content
+                        if not next_line and desc_parts:
+                            break
+                        if next_line.startswith('**') or next_line.startswith('#'):
+                            break
+                        if next_line:
+                            desc_parts.append(next_line)
+
+                    description = ' '.join(desc_parts)
                     break
 
             # Count insights and quotes
