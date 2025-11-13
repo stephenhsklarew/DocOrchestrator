@@ -1,0 +1,40 @@
+# Qwilo Google Drive Pipeline - Example Configuration
+# Copy this file to qwilo_gdrive_pipeline.yaml and customize for your setup
+
+name: "Qwilo Google Drive Pipeline"
+
+# Global settings
+global:
+  mode: "test" # Using Qwen 2.5 32B (local, free)
+
+# Stage 1: Idea Generation
+idea_generation:
+  source: "drive"
+  folder_id: "YOUR_GOOGLE_DRIVE_FOLDER_ID" # Get from Google Drive folder URL
+  focus: "AI strategy and innovation"
+  fast_mode: false # false = Qwen 2.5 32B (local, ~11 tok/s), true = Gemini 2.5 Flash (cloud, 300+ tok/s)
+  combined_topics: false # Save each topic separately
+
+# Stage 2: Document Generation
+document_generation:
+  # Writing configuration
+  style: "" # Using default style
+  audience: "business leaders"
+  type: "blog post"
+  size: "2000 words"
+
+  # Optional customer story
+  customer_story: "" # AI will create fictional example
+
+  # Output location
+  output: "./output" # Local directory
+
+# Orchestration settings
+orchestration:
+  stage1_timeout: 1800 # 30 minutes for idea generation
+  stage2_timeout: 300 # 5 minutes per document
+  retry_on_failure: true
+  save_session: true
+  log_level: "INFO" # INFO level logging
+  use_manifest: true # Use manifest if available
+  batch_mode: false # Interactive mode
