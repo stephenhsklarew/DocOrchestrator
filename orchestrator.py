@@ -662,9 +662,8 @@ class DocOrchestrator:
         """Display topics in a rich table"""
         table = Table(title=f"📋 Generated Topics ({len(topics)} found)", show_header=True, show_lines=True)
         table.add_column("#", style="cyan", width=3)
-        table.add_column("Title", style="bold", width=35)
-        table.add_column("Description", style="dim", width=110)
-        table.add_column("Words", justify="right", width=7)
+        table.add_column("Title", style="bold", no_wrap=False)
+        table.add_column("Description", style="dim")
 
         for i, topic in enumerate(topics, 1):
             desc = topic.get('description', '')
@@ -672,9 +671,8 @@ class DocOrchestrator:
 
             table.add_row(
                 str(i),
-                topic['title'][:33],
-                desc_preview,
-                str(topic['size'])
+                topic['title'],
+                desc_preview
             )
 
         self.console.print(table)
