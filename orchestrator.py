@@ -331,12 +331,17 @@ class DocOrchestrator:
                 "--save-local",  # Always save as local markdown for orchestration
             ]
 
-            # Phase 2: Add manifest and batch mode flags if enabled
+            # Add batch mode flag if enabled
+            if self.config.batch_mode:
+                cmd.append("--batch")
+                self.logger.info("Batch mode enabled - will auto-process without prompts")
+
+            # Phase 2: Add manifest output if enabled
             if self.config.use_manifest and self.config.batch_mode:
-                cmd.extend(["--batch", "--output-manifest", str(manifest_file)])
-                self.logger.info("Phase 2 mode: Using batch mode with manifest output")
+                cmd.extend(["--output-manifest", str(manifest_file)])
+                self.logger.info("Phase 2 mode: Using manifest output")
             else:
-                self.logger.info("Phase 1 mode: Using interactive file discovery")
+                self.logger.info("Phase 1 mode: Using file discovery")
 
             # Add --yes flag for auto-confirmation if enabled
             if self.auto_confirm:
